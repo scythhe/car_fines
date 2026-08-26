@@ -1,0 +1,36 @@
+name: Daily fines check
+
+on:
+  schedule:
+    # 09:00 Tbilisi time (UTC+4, no DST) = 05:00 UTC
+    - cron: "0 5 * * *"
+  workflow_dispatch: {}  # lets you trigger a manual test run from the Actions tab
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install requests
+
+      - name: Run daily fines check
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python daily_fines_check.py --notify --delay 1.5
+
+      - name: Commit updated ledger
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add fines_ledger.csv
+          git diff --cached --quiet || git commit -m "chore: update fines ledger [skip ci]"
+          git push

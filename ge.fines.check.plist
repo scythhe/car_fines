@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>ge.fines.check</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/giorgigviniashvili/fines/.venv/bin/python</string>
+    <string>/Users/giorgigviniashvili/fines/daily_fines_check.py</string>
+    <string>--notify</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/giorgigviniashvili/fines</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>TELEGRAM_BOT_TOKEN</key><string>REPLACE_ME</string>
+    <key>TELEGRAM_CHAT_ID</key><string>REPLACE_ME</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+  <key>StandardOutPath</key><string>/Users/giorgigviniashvili/fines/log.txt</string>
+  <key>StandardErrorPath</key><string>/Users/giorgigviniashvili/fines/error.txt</string>
+</dict>
+</plist>
