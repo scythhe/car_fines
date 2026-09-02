@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 log.txt
 error.txt
+.DS_Store
 
 # Google OAuth secrets — never commit these
 credentials.json
