@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 log.txt
 error.txt
+
+# Google OAuth secrets — never commit these
+credentials.json
+token.json
