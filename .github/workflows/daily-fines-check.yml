@@ -26,7 +26,7 @@ jobs:
           TZ: Asia/Tbilisi  # so timestamps in the log + Telegram match the 09:00 cron
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python daily_fines_check.py --notify --heartbeat --delay 1.5
+        run: python daily_fines_check.py --notify --heartbeat --delay 0.6
 
       - name: Commit updated ledger + run log
         if: always()  # still record the run even if the check step reported failures

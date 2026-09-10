@@ -127,20 +127,35 @@ def append_check_log(path: Path, entries: list[dict]) -> None:
 # --- notification ---------------------------------------------------------------
 
 
-def format_alert(new_rows: list[dict]) -> str:
-    lines = [f"\U0001F6A8 {len(new_rows)} ახალი ჯარიმა შემოწმებულ ავტოპარკზე:", ""]
-    for r in new_rows:
-        amount = r["amount_gel"]
-        amount_s = f"{float(amount):.0f}" if amount not in (None, "") else "?"
-        src = SOURCE_LABEL_KA.get(r.get("source", ""), r.get("source", ""))
-        lines.append(
-            f"\U0001F697 {r['plate']}  ({src})\n"
-            f"თანხა: {amount_s} ₾\n"
-            f"მუხლი: {r['article']}\n"
-            f"დარჩენილია: {r['days_left']} დღე\n"
-            f"ქვითარი: {r['receipt_no']}\n"
-        )
-    return "\n".join(lines)
+def _fine_block(r: dict) -> str:
+    amount = r["amount_gel"]
+    amount_s = f"{float(amount):.0f}" if amount not in (None, "") else "?"
+    src = SOURCE_LABEL_KA.get(r.get("source", ""), r.get("source", ""))
+    return (
+        f"\U0001F697 {r['plate']}  ({src})\n"
+        f"თანხა: {amount_s} ₾\n"
+        f"მუხლი: {r['article']}\n"
+        f"დარჩენილია: {r['days_left']} დღე\n"
+        f"ქვითარი: {r['receipt_no']}\n"
+    )
+
+
+def format_alert(new_rows: list[dict], max_chars: int = 3500) -> list[str]:
+    """One or more Telegram messages listing the new fines (Telegram caps at 4096)."""
+    header = f"\U0001F6A8 {len(new_rows)} ახალი ჯარიმა შემოწმებულ ავტოპარკზე:"
+    blocks = [_fine_block(r) for r in new_rows]
+    messages, cur = [], header + "\n"
+    for b in blocks:
+        if len(cur) + len(b) + 1 > max_chars and cur.strip() != header:
+            messages.append(cur.rstrip())
+            cur = ""
+        cur += "\n" + b
+    if cur.strip():
+        messages.append(cur.rstrip())
+    n = len(messages)
+    if n > 1:
+        messages = [f"({i}/{n})\n{m}" for i, m in enumerate(messages, 1)]
+    return messages
 
 
 def format_heartbeat(run_at: str, log_entries: list[dict]) -> str:
@@ -316,7 +331,8 @@ def run(plates_path: Path, ledger_path: Path, check_log_path: Path,
                   file=sys.stderr)
         else:
             if notify and all_new and not is_first_run:
-                send_telegram(token, chat_id, format_alert(all_new))
+                for msg in format_alert(all_new):
+                    send_telegram(token, chat_id, msg)
             if heartbeat:
                 send_telegram(token, chat_id, format_heartbeat(run_at, log_entries))
 
