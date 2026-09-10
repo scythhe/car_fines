@@ -5,12 +5,21 @@ from PDF customs declarations (შეტყობინება).
 
 Supports both local files and Google Drive streaming (no download).
 
+Incremental by default: when --csv points at a file that already exists, any
+PDF whose filename is already in that CSV is skipped entirely -- not
+re-downloaded from Drive, not re-parsed -- and the CSV is rewritten as the
+union (existing rows + newly processed rows), deduplicated by filename. So
+re-running against a growing folder only ever costs the new files. Pass
+--full to re-extract everything being scanned this run (existing rows for
+files you are NOT scanning are still kept).
+
 Usage — LOCAL FILES:
     python3 extract_transit_number.py *.pdf
     python3 extract_transit_number.py ~/customs_pdfs/*.pdf --csv plates.csv
 
 Usage — GOOGLE DRIVE (streams without downloading):
     python3 extract_transit_number.py --drive-folder FOLDER_ID --csv plates.csv
+    python3 extract_transit_number.py --drive-folder FOLDER_ID --csv plates.csv --full
 
 Install:
     pip install pymupdf google-auth-oauthlib google-auth-httplib2 google-api-python-client
@@ -58,6 +67,28 @@ except ImportError:
 
 SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
 TRANSIT_PATTERN = re.compile(r'\b(\d{4}[A-Z]{2})\b')
+CSV_FIELDS = ["file", "transit_number"]
+
+
+# --- results CSV I/O --------------------------------------------------------
+
+def load_existing_csv(csv_path: str | None) -> dict[str, dict]:
+    """Return {filename: row} from an existing results CSV, or {} if absent."""
+    if not csv_path:
+        return {}
+    p = Path(csv_path)
+    if not p.exists():
+        return {}
+    with open(p, newline="", encoding="utf-8-sig") as f:
+        return {r["file"]: r for r in csv.DictReader(f) if r.get("file")}
+
+
+def write_results_csv(csv_path: str, rows_by_file: dict[str, dict]) -> None:
+    rows = sorted(rows_by_file.values(), key=lambda r: r["file"])
+    with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.DictWriter(f, fieldnames=CSV_FIELDS, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(rows)
 
 
 # --- Google Drive -------------------------------------------------------
@@ -100,11 +131,8 @@ def get_drive_creds(creds_file: Path = Path("credentials.json")) -> Credentials:
     return creds
 
 
-def list_drive_pdfs(folder_id: str) -> list[tuple[str, io.BytesIO]]:
-    """
-    Stream PDFs from a Google Drive folder into memory (no disk download).
-    Returns list of (filename, BytesIO stream) tuples.
-    """
+def list_drive_pdf_names(folder_id: str) -> list[dict]:
+    """List PDF file metadata (id + name) in a Drive folder. Paginated."""
     try:
         creds = get_drive_creds()
     except FileNotFoundError as e:
@@ -112,48 +140,60 @@ def list_drive_pdfs(folder_id: str) -> list[tuple[str, io.BytesIO]]:
         sys.exit(1)
 
     service = build('drive', 'v3', credentials=creds)
-    
-    # Query for PDFs in this folder, excluding trash
     query = f"'{folder_id}' in parents and mimeType='application/pdf' and trashed=false"
-    
+
+    files: list[dict] = []
+    page_token = None
     try:
-        results = service.files().list(
-            q=query,
-            spaces='drive',
-            pageSize=100,
-            fields='files(id, name)'
-        ).execute()
+        while True:
+            resp = service.files().list(
+                q=query, spaces='drive', pageSize=1000,
+                fields='nextPageToken, files(id, name)',
+                pageToken=page_token,
+            ).execute()
+            files.extend(resp.get('files', []))
+            page_token = resp.get('nextPageToken')
+            if not page_token:
+                break
     except Exception as e:
         print(f"Error listing Drive folder: {e}", file=sys.stderr)
         print(f"Make sure folder ID is correct: {folder_id}", file=sys.stderr)
         sys.exit(1)
 
-    files = results.get('files', [])
+    return files
+
+
+def stream_drive_pdfs(folder_id: str, skip: set[str] = frozenset()):
+    """
+    Yield (filename, BytesIO) for each PDF in the folder whose name is NOT in
+    `skip`. Files are streamed into memory one at a time (no disk download,
+    and skipped files are never fetched).
+    """
+    files = list_drive_pdf_names(folder_id)
     if not files:
         print(f"No PDFs found in folder {folder_id}", file=sys.stderr)
-        return []
+        return
 
-    print(f"[drive] found {len(files)} PDF(s)", file=sys.stderr)
-    pdfs = []
+    to_fetch = [f for f in files if f['name'] not in skip]
+    n_skip = len(files) - len(to_fetch)
+    print(f"[drive] {len(files)} PDF(s) in folder; "
+          f"{n_skip} already done, {len(to_fetch)} to fetch", file=sys.stderr)
 
-    for file in files:
+    creds = get_drive_creds()
+    service = build('drive', 'v3', credentials=creds)
+
+    for file in to_fetch:
         try:
-            # Stream the file into memory
             request = service.files().get_media(fileId=file['id'])
             fh = io.BytesIO()
             downloader = MediaIoBaseDownload(fh, request)
-            
             done = False
             while not done:
-                status, done = downloader.next_chunk()
-            
-            fh.seek(0)  # Reset to beginning for reading
-            pdfs.append((file['name'], fh))
-            print(f"[drive] {file['name']}", file=sys.stderr)
+                _, done = downloader.next_chunk()
+            fh.seek(0)
+            yield file['name'], fh
         except Exception as e:
-            print(f"[drive] {file['name']} error: {e}", file=sys.stderr)
-
-    return pdfs
+            print(f"[drive] {file['name']} download error: {e}", file=sys.stderr)
 
 
 # --- PDF extraction -------------------------------------------------------
@@ -229,11 +269,22 @@ def main() -> int:
     )
     ap.add_argument("files", nargs="*", help="local PDF files or glob patterns")
     ap.add_argument("--drive-folder", help="Google Drive folder ID to scan")
-    ap.add_argument("--csv", help="write results to CSV")
+    ap.add_argument("--csv", help="results CSV (incremental: merged + deduped by filename)")
+    ap.add_argument("--full", action="store_true",
+                    help="re-extract every PDF scanned this run instead of "
+                         "skipping ones already in --csv (rows for files not "
+                         "scanned this run are still kept)")
     ap.add_argument("--verbose", action="store_true", help="log details per file")
     args = ap.parse_args()
 
-    results = []
+    if not args.files and not args.drive_folder:
+        ap.error("nothing to do: pass local PDF paths and/or --drive-folder")
+
+    existing = load_existing_csv(args.csv)
+    skip: set[str] = set() if args.full else set(existing)
+    results_by_file: dict[str, dict] = dict(existing)  # always preserve prior rows
+
+    n_new = n_skipped_local = 0
 
     # --- LOCAL FILES ---
     if args.files:
@@ -244,15 +295,18 @@ def main() -> int:
                 pdf_paths.append(p)
             else:
                 pdf_paths.extend(Path(".").glob(pattern))
-
         pdf_paths = sorted(set(pdf_paths))
 
-        if not pdf_paths and not args.drive_folder:
-            ap.error("no local PDF files found")
-
         for pdf_path in pdf_paths:
+            if pdf_path.name in skip:
+                n_skipped_local += 1
+                if args.verbose:
+                    print(f"[{pdf_path.name}] skip (already in csv)", file=sys.stderr)
+                continue
             transit = extract_transit_number(pdf_path, verbose=args.verbose)
-            results.append({"file": pdf_path.name, "transit_number": transit or ""})
+            results_by_file[pdf_path.name] = {
+                "file": pdf_path.name, "transit_number": transit or ""}
+            n_new += 1
 
     # --- GOOGLE DRIVE ---
     if args.drive_folder:
@@ -264,26 +318,25 @@ def main() -> int:
             )
             return 1
 
-        pdfs = list_drive_pdfs(args.drive_folder)
-        for name, pdf_bytes in pdfs:
+        for name, pdf_bytes in stream_drive_pdfs(args.drive_folder, skip=skip):
             transit = extract_transit_number_from_bytes(pdf_bytes, name, verbose=args.verbose)
-            results.append({"file": name, "transit_number": transit or ""})
+            results_by_file[name] = {"file": name, "transit_number": transit or ""}
+            n_new += 1
 
-    if not results:
-        ap.error("no PDFs processed")
+    if not results_by_file:
+        ap.error("no PDFs processed and no existing CSV to keep")
 
     # --- OUTPUT ---
     if args.csv:
-        with open(args.csv, "w", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=["file", "transit_number"])
-            w.writeheader()
-            w.writerows(results)
-        found = sum(1 for r in results if r["transit_number"])
-        print(f"wrote {len(results)} results to {args.csv} ({found} found)", file=sys.stderr)
+        write_results_csv(args.csv, results_by_file)
+        found = sum(1 for r in results_by_file.values() if r["transit_number"])
+        print(f"{args.csv}: {len(results_by_file)} row(s) total, {found} with a "
+              f"transit number | this run: +{n_new} new"
+              + (f", {n_skipped_local} local skipped" if n_skipped_local else ""),
+              file=sys.stderr)
     else:
-        for r in results:
-            status = r["transit_number"] or "NOT FOUND"
-            print(f"{r['file']}: {status}")
+        for r in sorted(results_by_file.values(), key=lambda r: r["file"]):
+            print(f"{r['file']}: {r['transit_number'] or 'NOT FOUND'}")
 
     return 0
 
