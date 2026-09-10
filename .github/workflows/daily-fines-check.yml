@@ -23,6 +23,7 @@ jobs:
 
       - name: Run daily fines check (protocol + municipal)
         env:
+          TZ: Asia/Tbilisi  # so timestamps in the log + Telegram match the 09:00 cron
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python daily_fines_check.py --notify --heartbeat --delay 1.5
