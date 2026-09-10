@@ -2,21 +2,26 @@
 """
 police.ge fine lookup by license plate.
 
-Talks directly to the JSON endpoint the site's own JS calls
-(searchCarForm() in resources/assets/js/app.js):
+Two sister sites with an identical API are supported:
 
-    GET  https://police.ge/protocol/index.php            (cookies + csrf_token)
-    POST https://police.ge/protocol/index.php?url=protocols/searchByAuto
+    protocol   https://police.ge/protocol/index.php     (patrol / camera fines)
+    municipal  https://police.ge/municipal/index.php     (parking / municipal fines)
+
+Both talk to the same JSON endpoint their own JS calls (searchCarForm() in
+resources/assets/js/app.js):
+
+    GET  <base>/index.php                       (cookies + csrf_token)
+    POST <base>/index.php?url=protocols/searchByAuto
          firstResult=0&protocolAuto=<PLATE>&csrf_token=<token>
     -> {"success": true, "data": {"count": N, "results": [...]}}
 
 No browser automation is involved, so there is no risk of the page's default
-"most recent 30 fines" table being mistaken for search results (see the
---headful/tbody-polling bug this replaced).
+"most recent fines" table being mistaken for search results.
 
 Usage:
     python police_fines.py 8814NN
-    python police_fines.py 8814NN AA963AA JX520JX --csv fines.csv --json fines.json
+    python police_fines.py 8814NN --source municipal
+    python police_fines.py 8814NN --source both
     python police_fines.py --file plates.txt --state seen.json --new-only
 
 Install:
@@ -35,23 +40,31 @@ from pathlib import Path
 
 import requests
 
-BASE_URL = "https://police.ge/protocol/index.php"
-SEARCH_URL = "https://police.ge/protocol/index.php?url=protocols/searchByAuto"
+SOURCES = {
+    "protocol": "https://police.ge/protocol/index.php",
+    "municipal": "https://police.ge/municipal/index.php",
+}
+DEFAULT_SOURCE = "protocol"
 
 CSRF_RE = re.compile(r'name=["\']csrf_token["\']\s+value=["\']([^"\']+)["\']')
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-    ),
-    "Referer": BASE_URL,
-}
+_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
+
+
+def headers_for(base_url: str) -> dict:
+    return {"User-Agent": _UA, "Referer": base_url}
+
+
+# Back-compat: some callers still import HEADERS directly.
+HEADERS = headers_for(SOURCES[DEFAULT_SOURCE])
 
 CSV_FIELDS = [
-    "plate", "receipt_no", "fine_date", "violation_date", "delivered_date",
-    "due_date", "amount_gel", "days_left", "article", "location",
-    "published_date", "checked_at",
+    "source", "plate", "receipt_no", "fine_date", "violation_date",
+    "delivered_date", "due_date", "amount_gel", "days_left", "article",
+    "location", "published_date", "checked_at",
 ]
 
 # --- parsing ------------------------------------------------------------------
@@ -86,8 +99,10 @@ def to_int(v) -> int | None:
         return None
 
 
-def normalise(raw: dict, plate_query: str, checked_at: str) -> dict:
+def normalise(raw: dict, plate_query: str, checked_at: str,
+              source: str = DEFAULT_SOURCE) -> dict:
     return {
+        "source": source,
         "plate_query": plate_query,
         "plate": raw.get("protocolAuto") or plate_query,
         "receipt_no": raw.get("protocolNo", ""),
@@ -111,25 +126,28 @@ class ScrapeIntegrityError(Exception):
     """Raised when the server returns rows for a plate we didn't ask about."""
 
 
-def get_csrf_token(session: requests.Session, verbose: bool = False) -> str:
-    resp = session.get(BASE_URL, headers=HEADERS, timeout=30)
+def get_csrf_token(session: requests.Session, base_url: str = SOURCES[DEFAULT_SOURCE],
+                   verbose: bool = False) -> str:
+    resp = session.get(base_url, headers=headers_for(base_url), timeout=30)
     resp.raise_for_status()
     m = CSRF_RE.search(resp.text)
     if not m:
-        raise RuntimeError("could not find csrf_token on index page")
+        raise RuntimeError(f"could not find csrf_token on index page ({base_url})")
     if verbose:
         print(f"[csrf] {m.group(1)}", file=sys.stderr)
     return m.group(1)
 
 
 def search_plate(
-    session: requests.Session, plate: str, csrf_token: str, verbose: bool = False
+    session: requests.Session, plate: str, csrf_token: str,
+    base_url: str = SOURCES[DEFAULT_SOURCE], verbose: bool = False,
 ) -> tuple[list[dict], str]:
     """Returns (raw_results, status). status in {ok, empty, error, mismatch}."""
+    search_url = f"{base_url}?url=protocols/searchByAuto"
     data = {"firstResult": 0, "protocolAuto": plate, "csrf_token": csrf_token}
     if verbose:
-        print(f"[req] POST searchByAuto protocolAuto={plate}", file=sys.stderr)
-    resp = session.post(SEARCH_URL, data=data, headers=HEADERS, timeout=30)
+        print(f"[req] POST {search_url} protocolAuto={plate}", file=sys.stderr)
+    resp = session.post(search_url, data=data, headers=headers_for(base_url), timeout=30)
     resp.raise_for_status()
     payload = resp.json()
     if verbose:
@@ -155,18 +173,20 @@ def search_plate(
     return results, "ok"
 
 
-def run(plates: list[str], delay: float, verbose: bool = False) -> list[dict]:
+def run(plates: list[str], delay: float, source: str = DEFAULT_SOURCE,
+        verbose: bool = False) -> list[dict]:
     results: list[dict] = []
     checked_at = time.strftime("%Y-%m-%d %H:%M:%S")
+    base_url = SOURCES[source]
 
     session = requests.Session()
-    csrf_token = get_csrf_token(session, verbose)
+    csrf_token = get_csrf_token(session, base_url, verbose)
 
     for i, plate in enumerate(plates):
         status, raw_rows = "error", []
         for attempt in (1, 2):
             try:
-                raw_rows, status = search_plate(session, plate, csrf_token, verbose)
+                raw_rows, status = search_plate(session, plate, csrf_token, base_url, verbose)
                 break
             except ScrapeIntegrityError as e:
                 status = f"mismatch: {e}"
@@ -177,16 +197,16 @@ def run(plates: list[str], delay: float, verbose: bool = False) -> list[dict]:
                 status = f"error: {e}"
             if attempt == 1:
                 try:
-                    csrf_token = get_csrf_token(session, verbose)
+                    csrf_token = get_csrf_token(session, base_url, verbose)
                 except Exception:
                     pass
 
         if status == "ok":
-            found = [normalise(r, plate, checked_at) for r in raw_rows]
+            found = [normalise(r, plate, checked_at, source) for r in raw_rows]
             results.extend(found)
-            print(f"[{plate}] {len(found)} fine(s)", file=sys.stderr)
+            print(f"[{source}:{plate}] {len(found)} fine(s)", file=sys.stderr)
         else:
-            print(f"[{plate}] {status}", file=sys.stderr)
+            print(f"[{source}:{plate}] {status}", file=sys.stderr)
 
         if i < len(plates) - 1 and delay:
             time.sleep(delay)
@@ -219,6 +239,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Check police.ge fines by plate number.")
     ap.add_argument("plates", nargs="*", help="plate numbers, e.g. 8814NN AA963AA")
     ap.add_argument("--file", help="text file with one plate per line")
+    ap.add_argument("--source", choices=[*SOURCES, "both"], default=DEFAULT_SOURCE,
+                    help="which site(s) to query (default: protocol)")
     ap.add_argument("--csv", help="write results to CSV")
     ap.add_argument("--json", help="write results to JSON")
     ap.add_argument("--state", help="JSON file of already-seen receipts")
@@ -241,7 +263,10 @@ def main() -> int:
     if not plates:
         ap.error("no plates given (positional args or --file)")
 
-    rows = run(plates, args.delay, verbose=args.headful)
+    sources = list(SOURCES) if args.source == "both" else [args.source]
+    rows: list[dict] = []
+    for src in sources:
+        rows.extend(run(plates, args.delay, src, verbose=args.headful))
 
     seen: set[str] = set()
     if args.state:

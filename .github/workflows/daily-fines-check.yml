@@ -21,16 +21,17 @@ jobs:
 
       - run: pip install requests
 
-      - name: Run daily fines check
+      - name: Run daily fines check (protocol + municipal)
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python daily_fines_check.py --notify --delay 1.5
+        run: python daily_fines_check.py --notify --heartbeat --delay 1.5
 
-      - name: Commit updated ledger
+      - name: Commit updated ledger + run log
+        if: always()  # still record the run even if the check step reported failures
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add fines_ledger.csv
-          git diff --cached --quiet || git commit -m "chore: update fines ledger [skip ci]"
+          git add fines_ledger.csv check_log.csv
+          git diff --cached --quiet || git commit -m "chore: update fines ledger + check log [skip ci]"
           git push
