@@ -1,3 +1,5 @@
 ﻿run_at,source,plates_checked,plates_ok,plates_empty,plates_with_fines,plates_error,fines_on_record,new_fines,status
 2026-09-10 15:35:43,protocol,64,64,55,9,0,10,0,ok
 2026-09-10 15:35:43,municipal,64,64,64,0,0,0,0,ok
+2026-09-10 11:39:47,protocol,64,64,55,9,0,10,0,ok
+2026-09-10 11:39:47,municipal,64,64,64,0,0,0,0,ok
