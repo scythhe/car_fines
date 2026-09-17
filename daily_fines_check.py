@@ -33,7 +33,8 @@ Usage:
 
 Env (only read when --notify / --heartbeat is passed):
     TELEGRAM_BOT_TOKEN
-    TELEGRAM_CHAT_ID
+    TELEGRAM_CHAT_ID   one id, or several separated by commas/whitespace --
+                       every message goes to all of them
 
 Install:
     pip install requests
@@ -44,6 +45,7 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -185,9 +187,19 @@ def send_telegram(token: str, chat_id: str, text: str) -> bool:
         resp.raise_for_status()
         return bool(resp.json().get("ok"))
     except Exception as e:
-        print(f"[telegram] notify failed, data is still in the ledger csv: {e}",
-              file=sys.stderr)
+        print(f"[telegram] notify failed for chat_id={chat_id}, data is still "
+              f"in the ledger csv: {e}", file=sys.stderr)
         return False
+
+
+def parse_chat_ids(raw: str) -> list[str]:
+    """TELEGRAM_CHAT_ID may be one id or several, comma/whitespace-separated."""
+    return [c.strip() for c in re.split(r"[,\s]+", raw or "") if c.strip()]
+
+
+def send_telegram_all(token: str, chat_ids: list[str], text: str) -> None:
+    for chat_id in chat_ids:
+        send_telegram(token, chat_id, text)
 
 
 # --- per-source check ------------------------------------------------------
@@ -324,17 +336,17 @@ def run(plates_path: Path, ledger_path: Path, check_log_path: Path,
 
     if notify or heartbeat:
         token = os.environ.get("TELEGRAM_BOT_TOKEN")
-        chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-        if not token or not chat_id:
+        chat_ids = parse_chat_ids(os.environ.get("TELEGRAM_CHAT_ID", ""))
+        if not token or not chat_ids:
             print("[telegram] TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set, "
                   "skipping messages (data is still in the ledger + check log)",
                   file=sys.stderr)
         else:
             if notify and all_new and not is_first_run:
                 for msg in format_alert(all_new):
-                    send_telegram(token, chat_id, msg)
+                    send_telegram_all(token, chat_ids, msg)
             if heartbeat:
-                send_telegram(token, chat_id, format_heartbeat(run_at, log_entries))
+                send_telegram_all(token, chat_ids, format_heartbeat(run_at, log_entries))
 
     return 2 if any_failed else 0
 
